@@ -27,8 +27,6 @@ import (
 	kvmgmt "github.com/Azure/azure-sdk-for-go/services/keyvault/mgmt/2016-10-01/keyvault"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
-	secrets "gocloud.dev/secrets"
-	_ "gocloud.dev/secrets/localsecrets"
 	k8spb "github.com/Azure/kubernetes-kms/v1beta1"
 )
 
