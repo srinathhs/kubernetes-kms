@@ -33,7 +33,7 @@ import (
 const (
 	// Unix Domain Socket
 	netProtocol      = "unix"
-	socketPath       = "/opt/azurekms.socket"
+	socketPath       = "/var/run/kmsplugin/socketv2.sock"
 	version          = "v1beta1"
 	runtime          = "Microsoft AzureKMS"
 	runtimeVersion   = "0.0.9"
