@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	b64 "encoding/base64"
 	"flag"
 	"fmt"
 	"log"
@@ -181,8 +182,7 @@ func getVersionFromKid(kid *string) (version string, err error) {
 	return version, nil
 }
 
-func getKeyV2(subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment) (*secrets.Keeper, error) {
-	ctx := context.Background()
+func getKeyV2(ctx context.Context, subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment) (*secrets.Keeper, error) {
 	if localsecret == nil {
 
 		kvClient, vaultBaseUrl, keyName, keyVersion, err := getKey(ctx, subscriptionID, providerVaultName, providerKeyName, providerKeyVersion, resourceGroup, configFilePath, env)
@@ -196,7 +196,7 @@ func getKeyV2(subscriptionID string, providerVaultName string, providerKeyName s
 			os.Exit(1)
 		}
 		parameter := kv.KeyOperationsParameters{
-			Algorithm: kv.RSA15,
+			Algorithm: kv.RSAOAEP,
 			Value:     data,
 		}
 
@@ -205,21 +205,32 @@ func getKeyV2(subscriptionID string, providerVaultName string, providerKeyName s
 			fmt.Println("failed to decrypt, error: ", err)
 			return nil, err
 		}
-		localsecret = result.Result
+		fmt.Println(*result.Result)
+		s := *result.Result
+		if i := len(s) % 4; i != 0 {
+			s += strings.Repeat("=", 4-i)
+		}
+		sDec, err := b64.StdEncoding.DecodeString(s)
+		if err != nil {
+			fmt.Println("failed to decrypt, error: ", err)
+			return nil, err
+		}
+		kee := string(sDec)
+		localsecret = &kee
 	}
 	// bytes, err := base64.RawURLEncoding.DecodeString(*result.Result)
 	savedKeyKeeper, err := secrets.OpenKeeper(ctx, *localsecret)
 	if err != nil {
 		return nil, err
 	}
-	defer savedKeyKeeper.Close()
 	return savedKeyKeeper, nil
 
 }
 
 // doEncrypt encrypts with an existing key
 func doEncrypt(ctx context.Context, data []byte, subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment, s *KeyManagementServiceServer) ([]byte, error) {
-	keeper, err := getKeyV2(subscriptionID, providerVaultName, providerKeyName, providerKeyVersion, resourceGroup, configFilePath, env)
+	keeper, err := getKeyV2(ctx, subscriptionID, providerVaultName, providerKeyName, providerKeyVersion, resourceGroup, configFilePath, env)
+	defer keeper.Close()
 	if err != nil {
 		log.Println("doEncrypt failed")
 		return nil, err
@@ -233,7 +244,8 @@ func doEncrypt(ctx context.Context, data []byte, subscriptionID string, provider
 
 // doDecrypt decrypts with an existing key
 func doDecrypt(ctx context.Context, data string, subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment, s *KeyManagementServiceServer) ([]byte, error) {
-	keeper, err := getKeyV2(subscriptionID, providerVaultName, providerKeyName, providerKeyVersion, resourceGroup, configFilePath, env)
+	keeper, err := getKeyV2(ctx, subscriptionID, providerVaultName, providerKeyName, providerKeyVersion, resourceGroup, configFilePath, env)
+	defer keeper.Close()
 	if err != nil {
 		log.Println("doDecrypt failed")
 		return nil, err
@@ -306,7 +318,7 @@ func (s *KeyManagementServiceServer) Version(ctx context.Context, request *k8spb
 
 func (s *KeyManagementServiceServer) Encrypt(ctx context.Context, request *k8spb.EncryptRequest) (*k8spb.EncryptResponse, error) {
 
-	log.Println("Processing EncryptRequest: ")
+	fmt.Println("Processing EncryptRequest: ")
 	cipher, err := doEncrypt(ctx, request.Plain, s.azConfig.SubscriptionID, *(s.providerVaultName), *(s.providerKeyName), *(s.providerKeyVersion), *(s.resourceGroup), s.configFilePath, s.env, s)
 	if err != nil {
 		fmt.Println("failed to doencrypt, error: ", err)
@@ -317,7 +329,7 @@ func (s *KeyManagementServiceServer) Encrypt(ctx context.Context, request *k8spb
 
 func (s *KeyManagementServiceServer) Decrypt(ctx context.Context, request *k8spb.DecryptRequest) (*k8spb.DecryptResponse, error) {
 
-	log.Println("Processing DecryptRequest: ")
+	fmt.Println("Processing DecryptRequest: ")
 	plain, err := doDecrypt(ctx, string(request.Cipher), s.azConfig.SubscriptionID, *(s.providerVaultName), *(s.providerKeyName), *(s.providerKeyVersion), *(s.resourceGroup), s.configFilePath, s.env, s)
 	if err != nil {
 		fmt.Println("failed to decrypt, error: ", err)
