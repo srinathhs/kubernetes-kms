@@ -264,7 +264,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGTERM)
 
 	var (
-		debugListenAddr = flag.String("debug-listen-addr", "127.0.0.1:7901", "HTTP listen address.")
+		debugListenAddr = flag.String("debug-listen-addr", "127.0.0.1:7902", "HTTP listen address.")
 	)
 	configFilePath := flag.String("configFilePath", "/etc/kubernetes/azure.json", "Path for Azure Cloud Provider config file. ")
 	flag.Parse()
