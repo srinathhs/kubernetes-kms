@@ -6,7 +6,7 @@
 package main
 
 import (
-	"encoding/base64"
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -16,18 +16,17 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
-
-	"golang.org/x/net/context"
-	"golang.org/x/net/trace"
-	"golang.org/x/sys/unix"
-	"google.golang.org/grpc"
 
 	kv "github.com/Azure/azure-sdk-for-go/services/keyvault/2016-10-01/keyvault"
 	kvmgmt "github.com/Azure/azure-sdk-for-go/services/keyvault/mgmt/2016-10-01/keyvault"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
 	k8spb "github.com/Azure/kubernetes-kms/v1beta1"
+	"gocloud.dev/secrets"
+	_ "gocloud.dev/secrets/localsecrets"
+	"golang.org/x/net/trace"
+	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
 )
 
 const (
@@ -48,7 +47,7 @@ type AzureConfig struct {
 }
 
 var (
-	localsecretsKeeper *secrets.keeper
+	localsecret *string
 )
 
 // KeyManagementServiceServer is a gRPC server.
@@ -95,19 +94,19 @@ func New(pathToUnixSocketFile string, configFilePath string) (*KeyManagementServ
 	return keyManagementServiceServer, nil
 }
 
-func getSecret(basicClient keyvault.BaseClient, secname string)  (*string, error){
-	secretResp, err := basicClient.GetSecret(context.Background(), "https://"+vaultName+".vault.azure.net", secname, "")
+func getSecret(basicClient kv.BaseClient, secname string, providerVaultName string) (*string, error) {
+	secretResp, err := basicClient.GetSecret(context.Background(), "https://"+providerVaultName+".vault.azure.net", secname, "")
 	if err != nil {
 		fmt.Printf("unable to get value for secret: %v\n", err)
 		os.Exit(1)
 	}
-	return *secretResp.Value, nil
+	return secretResp.Value, nil
 }
 
-func getKey(subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment) (kv.ManagementClient, string, string, string, error) {
+func getKey(ctx context.Context, subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment) (kv.BaseClient, string, string, string, error) {
 	kvClient := kv.New()
 	kvClient.AddToUserAgent("k8s-kms-keyvault")
-	vaultUrl, vaultSku, err := getVault(subscriptionID, providerVaultName, resourceGroup, configFilePath, env)
+	vaultUrl, _, err := getVault(ctx, subscriptionID, providerVaultName, resourceGroup, configFilePath, env)
 	if err != nil {
 		return kvClient, "", "", "", fmt.Errorf("failed to get vault, error: %v", err)
 	}
@@ -121,7 +120,7 @@ func getKey(subscriptionID string, providerVaultName string, providerKeyName str
 	fmt.Println("Verify key version from key vault ", providerKeyName, providerKeyVersion, *vaultUrl)
 
 	var kid *string
-	keyBundle, err := kvClient.GetKey(*vaultUrl, providerKeyName, providerKeyVersion)
+	keyBundle, err := kvClient.GetKey(ctx, *vaultUrl, providerKeyName, providerKeyVersion)
 	if err != nil {
 		if providerKeyVersion != "" {
 			return kvClient, "", "", "", fmt.Errorf("failed to verify the provided key version, error: %v", err)
@@ -157,9 +156,9 @@ func getVaultsClient(subscriptionID string, configFilePath string, env *azure.En
 	return vaultsClient
 }
 
-func getVault(subscriptionID string, vaultName string, resourceGroup string, configFilePath string, env *azure.Environment) (vaultUrl *string, sku kvmgmt.SkuName, err error) {
+func getVault(ctx context.Context, subscriptionID string, vaultName string, resourceGroup string, configFilePath string, env *azure.Environment) (vaultUrl *string, sku kvmgmt.SkuName, err error) {
 	vaultsClient := getVaultsClient(subscriptionID, configFilePath, env)
-	vault, err := vaultsClient.Get(resourceGroup, vaultName)
+	vault, err := vaultsClient.Get(ctx, resourceGroup, vaultName)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get vault, error: %v", err)
 	}
@@ -182,43 +181,44 @@ func getVersionFromKid(kid *string) (version string, err error) {
 	return version, nil
 }
 
-func getKeyV2(subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment) (*secrets.keeper, error) {
-	if localsecretsKeeper != nil  {
-		return localsecretsKeeper, nil
-	}
-	kvClient, vaultBaseUrl, keyName, keyVersion, err := getKey(subscriptionID, providerVaultName, providerKeyName, providerKeyVersion, resourceGroup, configFilePath, env)	
-	if err != nil {
-		fmt.Printf("unable to get key: %v\n", err)
-		os.Exit(1)
-	}
-	data, err = getSecret(kvClient,"EncryptionProvider")
-	if err != nil {
-		fmt.Printf("unable to get secret: %v\n", err)
-		os.Exit(1)
-	}
-	parameter := kv.KeyOperationsParameters{
-		Algorithm: kv.RSA15,
-		Value:     &data,
-	}
+func getKeyV2(subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment) (*secrets.Keeper, error) {
+	ctx := context.Background()
+	if localsecret == nil {
 
-	result, err := kvClient.Decrypt(vaultBaseUrl, keyName, keyVersion, parameter)
-	if err != nil {
-		fmt.Println("failed to decrypt, error: ", err)
-		return nil, err
+		kvClient, vaultBaseUrl, keyName, keyVersion, err := getKey(ctx, subscriptionID, providerVaultName, providerKeyName, providerKeyVersion, resourceGroup, configFilePath, env)
+		if err != nil {
+			fmt.Printf("unable to get key: %v\n", err)
+			os.Exit(1)
+		}
+		data, err := getSecret(kvClient, "EncryptionProvider", providerVaultName)
+		if err != nil {
+			fmt.Printf("unable to get secret: %v\n", err)
+			os.Exit(1)
+		}
+		parameter := kv.KeyOperationsParameters{
+			Algorithm: kv.RSA15,
+			Value:     data,
+		}
+
+		result, err := kvClient.Decrypt(ctx, vaultBaseUrl, keyName, keyVersion, parameter)
+		if err != nil {
+			fmt.Println("failed to decrypt, error: ", err)
+			return nil, err
+		}
+		localsecret = result.Result
 	}
 	// bytes, err := base64.RawURLEncoding.DecodeString(*result.Result)
-	savedKeyKeeper, err := secrets.OpenKeeper(ctx, result.Result)
+	savedKeyKeeper, err := secrets.OpenKeeper(ctx, *localsecret)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer savedKeyKeeper.Close()
-	localsecretsKeeper = &localsecretsKeeper
-	return &savedKeyKeeper, nil
+	return savedKeyKeeper, nil
 
 }
 
 // doEncrypt encrypts with an existing key
-func doEncrypt(ctx context.Context, data []byte, subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment, s *KeyManagementServiceServer) (*string, error) {
+func doEncrypt(ctx context.Context, data []byte, subscriptionID string, providerVaultName string, providerKeyName string, providerKeyVersion string, resourceGroup string, configFilePath string, env *azure.Environment, s *KeyManagementServiceServer) ([]byte, error) {
 	keeper, err := getKeyV2(subscriptionID, providerVaultName, providerKeyName, providerKeyVersion, resourceGroup, configFilePath, env)
 	if err != nil {
 		log.Println("doEncrypt failed")
@@ -226,7 +226,7 @@ func doEncrypt(ctx context.Context, data []byte, subscriptionID string, provider
 	}
 	cipherText, err := keeper.Encrypt(ctx, data)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return cipherText, nil
 }
@@ -238,13 +238,12 @@ func doDecrypt(ctx context.Context, data string, subscriptionID string, provider
 		log.Println("doDecrypt failed")
 		return nil, err
 	}
-	var cipherText []byte(data)
+	var cipherText = []byte(data)
 	plainText, err := keeper.Decrypt(ctx, cipherText)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	bytes, err := base64.RawURLEncoding.DecodeString(plainText)
-	return bytes, nil
+	return plainText, nil
 }
 
 func main() {
@@ -313,7 +312,7 @@ func (s *KeyManagementServiceServer) Encrypt(ctx context.Context, request *k8spb
 		fmt.Println("failed to doencrypt, error: ", err)
 		return &k8spb.EncryptResponse{}, err
 	}
-	return &k8spb.EncryptResponse{Cipher: []byte(*cipher)}, nil
+	return &k8spb.EncryptResponse{Cipher: cipher}, nil
 }
 
 func (s *KeyManagementServiceServer) Decrypt(ctx context.Context, request *k8spb.DecryptRequest) (*k8spb.DecryptResponse, error) {
