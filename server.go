@@ -205,7 +205,7 @@ func getKeyV2(ctx context.Context, subscriptionID string, providerVaultName stri
 			fmt.Println("failed to decrypt, error: ", err)
 			return nil, err
 		}
-		fmt.Println(*result.Result)
+		//fmt.Println(*result.Result)
 		s := *result.Result
 		if i := len(s) % 4; i != 0 {
 			s += strings.Repeat("=", 4-i)
